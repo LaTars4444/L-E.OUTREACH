@@ -1,6 +1,8 @@
 import os
 import re
 import base64
+import time
+import random
 from email.mime.text import MIMEText
 from pypdf import PdfReader
 import google_auth_oauthlib.flow
@@ -10,10 +12,10 @@ from flask import Flask, render_template_string, request, redirect, url_for, ses
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "fallback_secret")
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "prod_key_123")
 app.config['UPLOAD_FOLDER'] = '/tmp'
 
-# --- CONFIG ---
+# --- GOOGLE OAUTH CONFIG ---
 CLIENT_CONFIG = {
     "web": {
         "client_id": os.environ.get("GOOGLE_CLIENT_ID"),
@@ -26,34 +28,34 @@ CLIENT_CONFIG = {
 }
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
-# --- BACKEND LOGIC ---
-def extract_emails(filepath):
-    emails = set()
+# --- BACKEND HELPERS ---
+def find_emails_in_text(text):
+    text = text.lower()
+    # Fix mashed emails (e.g. .comname@...)
+    for tld in ['.com', '.net', '.org', '.edu', '.co.uk']:
+        text = text.replace(tld, f"{tld} ")
+    return re.findall(r'[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}', text)
+
+def extract_from_pdf(filepath):
+    found = set()
     try:
         reader = PdfReader(filepath)
         for page in reader.pages:
-            text = page.extract_text()
-            found = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)
-            emails.update(found)
-    except Exception as e:
-        print(f"PDF Error: {e}")
-    return list(emails)
+            found.update(find_emails_in_text(page.extract_text() or ""))
+    except: pass
+    return list(found)
 
-def send_gmail(creds_dict, to_email, subject, body_text):
+def send_gmail(creds, to, sub, body):
     try:
-        creds = Credentials(**creds_dict)
-        service = build('gmail', 'v1', credentials=creds)
-        message = MIMEText(body_text)
-        message['to'] = to_email
-        message['subject'] = subject
-        raw = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+        service = build('gmail', 'v1', credentials=Credentials(**creds))
+        msg = MIMEText(body)
+        msg['to'], msg['subject'] = to, sub
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode('utf-8')
         service.users().messages().send(userId='me', body={'raw': raw}).execute()
         return True
-    except Exception as e:
-        print(f"Email Error: {e}")
-        return False
+    except: return False
 
-# --- UI ---
+# --- UI TEMPLATE ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -63,63 +65,115 @@ HTML_TEMPLATE = """
     <title>Outreach System</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { font-family: -apple-system, system-ui, sans-serif; }
-        .btn { background: #000; color: #fff; transition: 0.2s; }
-        .btn:hover { background: #333; transform: translateY(-1px); }
-        .inp { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; width: 100%; outline: none; }
-        .inp:focus { border-color: #000; }
+        body { font-family: -apple-system, system-ui, sans-serif; background-color: #fff; }
+        .inp { border: 1px solid #e5e7eb; border-radius: 14px; padding: 16px; width: 100%; outline: none; transition: 0.2s; }
+        .inp:focus { border-color: #000; box-shadow: 0 0 0 2px rgba(0,0,0,0.05); }
+        .btn-black { background: #000; color: #fff; border-radius: 16px; padding: 18px; font-weight: 700; transition: 0.2s; cursor: pointer; text-align: center; width: 100%; }
+        .btn-black:hover { background: #333; transform: translateY(-1px); }
+        .crypto-btn { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 14px; border: 1px solid #e5e7eb; border-radius: 14px; font-size: 13px; font-weight: 600; transition: 0.2s; background: #fff; width: 100%; }
+        .crypto-btn:hover { background: #fafafa; border-color: #000; }
     </style>
 </head>
-<body class="bg-white text-gray-900 h-screen flex flex-col items-center justify-center">
-    <div class="w-full max-w-md p-8">
-        <h1 class="text-3xl font-bold mb-6 tracking-tight">Outreach System</h1>
+<body class="min-h-screen flex flex-col items-center justify-center p-6">
 
-        {% with messages = get_flashed_messages() %}
-          {% if messages %}
-            <div class="mb-4 p-3 bg-gray-100 rounded text-sm font-medium">{{ messages[0] }}</div>
+    <div class="w-full max-w-lg">
+        <header class="mb-12 text-center">
+            <h1 class="text-5xl font-black tracking-tighter mb-3">Outreach</h1>
+            <p class="text-gray-400 font-medium tracking-wide">Automated System</p>
+        </header>
+
+        {% with m = get_flashed_messages() %}
+          {% if m %}
+            <div class="mb-8 p-5 bg-black text-white rounded-2xl text-sm font-bold shadow-2xl">
+                {{ m[0]|safe }}
+            </div>
           {% endif %}
         {% endwith %}
 
         {% if not is_logged_in %}
-            <a href="/login" class="btn w-full py-3 rounded-lg font-medium flex justify-center">Sign in with Google</a>
+            <div class="text-center py-20 bg-gray-50 rounded-[40px] border border-gray-100">
+                <a href="/login" class="btn-black inline-block px-12">Sign in with Google</a>
+            </div>
         {% else %}
-            <form action="/process" method="POST" enctype="multipart/form-data" class="space-y-4">
-                <div>
-                    <label class="block text-xs font-bold uppercase mb-1">1. Upload Leads (PDF)</label>
-                    <input type="file" name="file" accept=".pdf" class="inp" required>
-                </div>
-                <div>
-                    <label class="block text-xs font-bold uppercase mb-1">2. Email Content</label>
-                    <input type="text" name="subject" placeholder="Subject" class="inp mb-2" required>
-                    <textarea name="body" placeholder="Message..." class="inp h-24" required></textarea>
-                </div>
+            <form action="/process" method="POST" enctype="multipart/form-data" class="space-y-8">
                 
-                <!-- PAYMENT WALL -->
-                <div class="p-4 border rounded-xl bg-gray-50">
-                    <label class="block text-xs font-bold uppercase mb-2">Donate (SOL)</label>
-                    <div class="flex gap-2 mb-2">
-                        <input type="number" id="amt" step="0.01" value="0.05" class="inp" oninput="upd()">
-                        <span class="flex items-center px-3 bg-gray-200 rounded font-bold">SOL</span>
+                <div class="space-y-4">
+                    <div class="flex justify-between items-end px-1">
+                        <label class="font-black text-[10px] uppercase tracking-[0.2em] text-gray-400">1. Target Emails</label>
+                        <span class="text-[10px] font-bold text-gray-400 uppercase cursor-pointer hover:text-black" onclick="document.getElementById('pdf-drawer').classList.toggle('hidden')">+ Add via PDF</span>
                     </div>
-                    <a id="pay" href="#" target="_blank" class="block w-full text-center py-2 border border-black rounded-lg text-xs font-bold hover:bg-black hover:text-white transition">SEND SOL</a>
+                    <textarea name="manual_emails" placeholder="Paste emails here..." class="inp h-32 font-mono text-sm shadow-sm"></textarea>
+                    
+                    <div id="pdf-drawer" class="hidden p-4 bg-gray-50 rounded-2xl border-2 border-dashed border-gray-200">
+                        <input type="file" name="file" accept=".pdf" class="text-xs font-bold">
+                    </div>
                 </div>
 
-                <button type="submit" class="btn w-full py-3 rounded-lg font-bold text-lg">LAUNCH CAMPAIGN</button>
+                <div class="space-y-4">
+                    <label class="font-black text-[10px] uppercase tracking-[0.2em] text-gray-400 px-1">2. Campaign Content</label>
+                    <input type="text" name="subject" placeholder="Subject Line" class="inp shadow-sm" required>
+                    <textarea name="body" placeholder="Your message content..." class="inp h-40 shadow-sm" required></textarea>
+                </div>
+                
+                <div class="space-y-4 bg-gray-50 p-6 rounded-[30px] border border-gray-100">
+                    <div class="flex justify-between items-center px-1">
+                        <label class="font-black text-[10px] uppercase tracking-[0.2em] text-gray-400">Support Project (Optional)</label>
+                        <div class="flex items-center gap-1 font-bold text-sm">
+                            <input type="number" id="amt" step="0.01" value="0.05" class="w-12 bg-transparent text-right outline-none">
+                            <span class="text-gray-400">UNIT</span>
+                        </div>
+                    </div>
+
+                    <div class="flex gap-3">
+                        <!-- Solana on Left -->
+                        <button type="button" onclick="paySol()" class="crypto-btn shadow-sm">
+                            <img src="https://cryptologos.cc/logos/solana-sol-logo.svg" class="w-4 h-4">
+                            Donate SOL
+                        </button>
+                        <!-- Bitcoin on Right -->
+                        <button type="button" onclick="payBtc()" class="crypto-btn shadow-sm">
+                            Donate BTC
+                            <img src="https://cryptologos.cc/logos/bitcoin-btc-logo.svg" class="w-4 h-4">
+                        </button>
+                    </div>
+                    <div id="addressBox" class="hidden text-[10px] font-mono bg-white p-3 border rounded-xl text-center break-all text-gray-500"></div>
+                </div>
+
+                <button type="submit" class="btn-black text-xl shadow-xl">
+                    Launch Campaign 🚀
+                </button>
             </form>
-            <div class="mt-4 text-center"><a href="/logout" class="text-xs text-gray-400">Logout</a></div>
+            <div class="mt-12 text-center"><a href="/logout" class="text-[10px] font-bold uppercase tracking-widest text-gray-300 hover:text-black transition">End Session</a></div>
         {% endif %}
     </div>
+
     <script>
-        const w = "4XLckyU64gq1KLwvG71TYEpHps7AKsWoTF3Uu6wD31Zd";
-        function upd() {
-            const v = document.getElementById('amt').value || '0.05';
-            document.getElementById('pay').href = `solana:${w}?amount=${v}&label=Donation`;
+        const SOL_WALLET = "4XLckyU64gq1KLwvG71TYEpHps7AKsWoTF3Uu6wD31Zd";
+        const BTC_WALLET = "bc1pnq620t2j04lrh9etyhwgxhjs495vtukhpgy7nlenyctpsjfwnh7qgxmzv7";
+
+        function paySol() {
+            const amt = document.getElementById('amt').value || '0.05';
+            window.location.href = `solana:${SOL_WALLET}?amount=${amt}&label=OutreachSupport`;
+            showAddr(SOL_WALLET);
         }
-        upd();
+
+        function payBtc() {
+            const amt = document.getElementById('amt').value;
+            window.location.href = `bitcoin:${BTC_WALLET}?amount=${amt}`;
+            showAddr(BTC_WALLET);
+        }
+
+        function showAddr(addr) {
+            const box = document.getElementById('addressBox');
+            box.innerText = "Address: " + addr;
+            box.classList.remove('hidden');
+        }
     </script>
 </body>
 </html>
 """
+
+# --- ROUTES ---
 
 @app.route('/')
 def index():
@@ -130,17 +184,15 @@ def login():
     try:
         flow = google_auth_oauthlib.flow.Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES)
         flow.redirect_uri = CLIENT_CONFIG['web']['redirect_uris'][0]
-        authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
+        auth_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
         session['state'] = state
-        return redirect(authorization_url)
-    except Exception as e:
-        return f"Login Error: {e}"
+        return redirect(auth_url)
+    except Exception as e: return f"OAuth Setup Error: {e}"
 
 @app.route('/callback')
 def callback():
     try:
-        state = session.get('state')
-        flow = google_auth_oauthlib.flow.Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, state=state)
+        flow = google_auth_oauthlib.flow.Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, state=session.get('state'))
         flow.redirect_uri = CLIENT_CONFIG['web']['redirect_uris'][0]
         flow.fetch_token(authorization_response=request.url)
         creds = flow.credentials
@@ -150,31 +202,36 @@ def callback():
             'client_secret': creds.client_secret, 'scopes': creds.scopes
         }
         return redirect(url_for('index'))
-    except:
-        return redirect(url_for('index'))
+    except: return redirect(url_for('index'))
 
 @app.route('/process', methods=['POST'])
 def process():
     if 'credentials' not in session: return redirect(url_for('login'))
+    
+    manual_text = request.form.get('manual_emails', '')
+    emails = set(find_emails_in_text(manual_text))
+    
     f = request.files.get('file')
     if f and f.filename.lower().endswith('.pdf'):
-        try:
-            path = os.path.join('/tmp', secure_filename(f.filename))
-            f.save(path)
-            emails = extract_emails(path)
-            if not emails:
-                flash("No emails found in PDF.")
-                return redirect(url_for('index'))
-            
-            count = 0
-            for e in emails:
-                if send_gmail(session['credentials'], e, request.form.get('subject'), request.form.get('body')):
-                    count += 1
-            flash(f"Sent {count} emails!")
-            return redirect(url_for('index'))
-        except Exception as e:
-            flash(f"Error: {e}")
-            return redirect(url_for('index'))
+        f.save(os.path.join('/tmp', secure_filename(f.filename)))
+        emails.update(extract_from_pdf(os.path.join('/tmp', secure_filename(f.filename))))
+    
+    final_list = list(emails)
+    if not final_list:
+        flash("System: 0 recipients found.")
+        return redirect(url_for('index'))
+
+    success_count = 0
+    # Sending loop with human delay
+    for i, e in enumerate(final_list):
+        if send_gmail(session['credentials'], e, request.form.get('subject'), request.form.get('body')):
+            success_count += 1
+        
+        # Human Delay: 5-15 seconds
+        if i < len(final_list) - 1:
+            time.sleep(random.randint(5, 15))
+    
+    flash(f"Success: {success_count} emails delivered to {len(final_list)} targets.")
     return redirect(url_for('index'))
 
 @app.route('/logout')
@@ -184,4 +241,3 @@ def logout():
 
 if __name__ == '__main__':
     os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
-    app.run(debug=True)
