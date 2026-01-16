@@ -10,7 +10,7 @@ from google.oauth2.credentials import Credentials
 from flask import Flask, render_template_string, request, redirect, url_for, session, flash
 from werkzeug.utils import secure_filename
 
-# --- CONFIG (From Render Environment Variables) ---
+# --- CONFIG ---
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
 PRICE_ID_WEEKLY = os.environ.get("PRICE_ID_WEEKLY")
 PRICE_ID_FOREVER = os.environ.get("PRICE_ID_FOREVER")
@@ -23,7 +23,7 @@ GOOGLE_CLIENT_CONFIG = {"web": {"client_id": GOOGLE_CLIENT_ID, "client_secret": 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "beta_secret_123")
 app.config['UPLOAD_FOLDER'] = '/tmp'
-DB_PATH = "/tmp/database.db" # Using tmp for local write access
+DB_PATH = "/tmp/outreach_v2.db" 
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -42,7 +42,8 @@ def get_user_email():
         try:
             creds = Credentials(**session['credentials'])
             service = build('oauth2', 'v2', credentials=creds)
-            return service.userinfo().get().execute().get('email')
+            info = service.userinfo().get().execute()
+            return info.get('email')
         except: return None
     return None
 
@@ -52,7 +53,9 @@ def check_access(email):
         user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
         if not user: return False
         if user['has_paid'] == 1: return True
-        if user['trial_end'] and datetime.now() < datetime.fromisoformat(user['trial_end']): return True
+        if user['trial_end']:
+            if datetime.now() < datetime.fromisoformat(user['trial_end']):
+                return True
     return False
 
 def find_emails_in_text(text):
@@ -91,33 +94,45 @@ HTML_TEMPLATE = """
     <div class="w-full max-w-xl bg-white rounded-[2.5rem] shadow-2xl p-8 md:p-12 border border-gray-100">
         <header class="text-center mb-10">
             <h1 class="text-5xl font-black italic underline decoration-4 mb-2">OUTREACH</h1>
-            <p class="text-gray-400 text-[10px] font-bold uppercase tracking-widest italic">Beta Production</p>
+            <p class="text-gray-400 text-[10px] font-bold uppercase tracking-widest italic">Beta Mode</p>
         </header>
 
         {% with m = get_flashed_messages() %}{% if m %}<div class="mb-6 p-4 bg-black text-white rounded-2xl text-sm font-bold text-center">{{ m[0]|safe }}</div>{% endif %}{% endwith %}
 
         {% if not is_logged_in %}
-            <div class="text-center py-12"><a href="/login" class="bg-black text-white px-10 py-5 rounded-2xl font-black text-lg">Sign in with Google</a></div>
+            <div class="text-center py-12"><a href="/login" class="bg-black text-white px-10 py-5 rounded-2xl font-black text-lg shadow-lg">Sign in with Google</a></div>
         {% elif not access_valid %}
             <div class="text-center space-y-6">
-                <div class="bg-blue-50 p-6 rounded-3xl border border-blue-100 text-blue-700 text-sm">
-                    <strong>Welcome:</strong> {{ user_email }}<br>Try for free or unlock permanent access.
+                <div class="bg-blue-50 p-6 rounded-3xl border border-blue-100 text-blue-800 text-sm">
+                    Logged in as: <b>{{ user_email }}</b>
                 </div>
-                <a href="/start-trial" class="block w-full bg-blue-600 text-white py-4 rounded-2xl font-black hover:bg-blue-700">Start 24-Hour Free Trial (No Card)</a>
+                
+                <a href="/start-trial" class="block w-full bg-blue-600 text-white py-5 rounded-2xl font-black text-lg shadow-lg hover:bg-blue-700 transition">Start 24-Hour Free Trial</a>
+                
                 <div class="grid md:grid-cols-2 gap-4">
-                    <form action="/create-checkout-session" method="POST"><input type="hidden" name="plan" value="weekly"><button class="w-full p-6 border-2 border-black rounded-3xl text-left font-black hover:bg-gray-50 transition">$3/Week</button></form>
-                    <form action="/create-checkout-session" method="POST"><input type="hidden" name="plan" value="forever"><button class="w-full p-6 bg-black text-white rounded-3xl text-left font-black hover:opacity-90 transition">$20 Forever</button></form>
+                    <form action="/create-checkout-session" method="POST"><input type="hidden" name="plan" value="weekly"><button class="w-full p-6 border-2 border-black rounded-3xl font-black hover:bg-gray-50 transition">$3 / WEEK</button></form>
+                    <form action="/create-checkout-session" method="POST"><input type="hidden" name="plan" value="forever"><button class="w-full p-6 bg-black text-white rounded-3xl font-black hover:opacity-90 transition">$20 FOREVER</button></form>
                 </div>
             </div>
         {% else %}
             <form action="/process" method="POST" enctype="multipart/form-data" class="space-y-4">
-                <div class="flex justify-between items-center text-[10px] font-black uppercase text-gray-400"><span>Recipients</span><span class="text-green-500 font-bold tracking-tighter">Access Active ✅</span></div>
-                <textarea name="manual_emails" placeholder="Paste emails..." class="w-full border p-4 rounded-2xl h-24 text-sm font-mono focus:ring-2 ring-black outline-none mb-1"></textarea>
-                <input type="file" name="extract_file" accept=".pdf" class="block w-full text-[10px] border border-dashed p-3 rounded-xl mb-4">
+                <div class="flex justify-between items-center text-[10px] font-black uppercase text-gray-400"><span>1. Target Emails</span><span class="text-green-500 font-bold">Access Active ✅</span></div>
+                <textarea name="manual_emails" placeholder="Paste emails..." class="w-full border p-4 rounded-2xl h-24 text-sm font-mono focus:ring-2 ring-black outline-none"></textarea>
+                <div class="p-4 bg-gray-50 rounded-2xl border-2 border-dashed border-gray-200">
+                    <p class="text-[9px] font-black text-gray-400 mb-2 uppercase">Or Extract from PDF:</p>
+                    <input type="file" name="extract_file" accept=".pdf" class="text-xs">
+                </div>
+                
+                <label class="block text-[10px] font-black uppercase text-gray-400 px-1 mt-4">2. Campaign Content</label>
                 <input type="text" name="subject" placeholder="Subject" class="w-full border p-4 rounded-xl text-sm outline-none focus:ring-2 ring-black" required>
-                <textarea name="body" placeholder="Message..." class="w-full border p-4 rounded-xl h-32 text-sm outline-none focus:ring-2 ring-black" required></textarea>
-                <div class="p-2 border rounded-xl"><label class="text-[9px] font-black uppercase text-gray-400 ml-1">Attachment (PDF)</label><input type="file" name="attachment_file" accept=".pdf" class="block w-full text-xs"></div>
-                <button type="submit" class="w-full bg-black text-white py-6 rounded-3xl font-black text-xl shadow-2xl">Launch 🚀</button>
+                <textarea name="body" placeholder="Message content..." class="w-full border p-4 rounded-xl h-32 text-sm outline-none focus:ring-2 ring-black" required></textarea>
+                
+                <div class="p-4 bg-gray-50 rounded-2xl border border-gray-200">
+                    <label class="block text-[10px] font-black uppercase text-gray-400 mb-2">3. Attachment (Optional PDF)</label>
+                    <input type="file" name="attachment_file" accept=".pdf" class="block w-full text-xs">
+                </div>
+                
+                <button type="submit" class="w-full bg-black text-white py-6 rounded-3xl font-black text-xl shadow-2xl mt-4">Launch Campaign 🚀</button>
             </form>
             <div class="mt-8 text-center"><a href="/logout" class="text-[10px] font-black uppercase text-gray-300">Logout</a></div>
         {% endif %}
@@ -138,11 +153,24 @@ def start_trial():
     email = get_user_email()
     if email:
         with get_db() as conn:
+            # Check if user already has an entry
             user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-            if not user or (not user['has_paid'] and not user['trial_end']):
+            if not user:
+                # New user: Start trial
                 end_date = (datetime.now() + timedelta(hours=24)).isoformat()
-                conn.execute("INSERT OR REPLACE INTO users (email, has_paid, trial_end) VALUES (?, 0, ?)", (email, end_date))
-                flash("Trial started! You have 24 hours.")
+                conn.execute("INSERT INTO users (email, has_paid, trial_end) VALUES (?, 0, ?)", (email, end_date))
+                conn.commit() # THE FIX
+                flash("Free Trial Unlocked! You have 24 hours.")
+            elif user['has_paid'] == 0 and not user['trial_end']:
+                # Existing user with no trial yet
+                end_date = (datetime.now() + timedelta(hours=24)).isoformat()
+                conn.execute("UPDATE users SET trial_end = ? WHERE email = ?", (end_date, email))
+                conn.commit() # THE FIX
+                flash("Free Trial Unlocked! You have 24 hours.")
+            else:
+                flash("Trial already used or permanent access active.")
+    else:
+        flash("Please log in first.")
     return redirect(url_for('index'))
 
 @app.route('/create-checkout-session', methods=['POST'])
@@ -157,8 +185,10 @@ def create_checkout():
 def payment_success():
     email = get_user_email()
     if email:
-        with get_db() as conn: conn.execute("INSERT OR REPLACE INTO users (email, has_paid) VALUES (?, 1)", (email,))
-        flash("Unlocked Forever! ✅")
+        with get_db() as conn: 
+            conn.execute("INSERT OR REPLACE INTO users (email, has_paid) VALUES (?, 1)", (email,))
+            conn.commit()
+        flash("Payment Verified! Permanent Access Unlocked ✅")
     return redirect(url_for('index'))
 
 @app.route('/login')
@@ -178,9 +208,9 @@ def callback():
     return redirect(url_for('index'))
 
 @app.route('/privacy')
-def privacy(): return "Privacy: We use Google OAuth to send emails. We do not store your data."
+def privacy(): return "Privacy: We use Google OAuth to send emails. We do not store your data permanently."
 @app.route('/terms')
-def terms(): return "Terms: Beta software. Use at your own risk. No spamming."
+def terms(): return "Terms: Beta software. Use at your own risk. No spamming allowed."
 
 @app.route('/process', methods=['POST'])
 def process():
@@ -199,7 +229,7 @@ def process():
     for i, e in enumerate(targets):
         if send_gmail(session['credentials'], e, request.form.get('subject'), request.form.get('body'), att_path): count += 1
         if i < len(targets) - 1: time.sleep(random.randint(5, 12))
-    flash(f"Sent {count} emails.")
+    flash(f"Campaign Complete: {count} emails delivered.")
     return redirect(url_for('index'))
 
 @app.route('/logout')
